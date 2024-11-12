@@ -423,7 +423,7 @@ void updateCurrentWeather() {
 
     // 如果请求成功，则解析JSON数据
     if (httpCode == HTTP_CODE_OK) {
-      String payload = httpClient.getString();                     // 获取响应内容
+      String payload = http.getString();                           // 获取响应内容
       const size_t JSON_CAPACITY = 2048;                           // 更大的缓冲区
       StaticJsonDocument<JSON_CAPACITY> doc;                       // 使用静态分配，避免堆内存碎片
       DeserializationError error = deserializeJson(doc, payload);  // 解析JSON数据
