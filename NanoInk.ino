@@ -116,13 +116,13 @@ void setup() {
 
     display.setFullWindow();                                     // 设置刷新模式为全屏刷新
     u8g2Fonts.setFont(u8g2_fhpixelfont16px_12_gb2312);           // 设置字体
-    uint16_t connw = u8g2Fonts.getUTF8Width("Initializing...");  // 计算字符串宽度
+    uint16_t connW = u8g2Fonts.getUTF8Width("Initializing...");  // 计算字符串宽度
 
     // 显示初始化页面
     display.firstPage();
     do {
       display.fillScreen(GxEPD_WHITE);
-      u8g2Fonts.setCursor(125 - connw / 2, 62);
+      u8g2Fonts.setCursor(125 - connW / 2, 62);
       u8g2Fonts.print("Initializing...");
     } while (display.nextPage());
 
@@ -191,8 +191,8 @@ void mainDisplay(bool partial) {
   Serial.println(totpCode);                                   // 打印动态验证码
 
   u8g2Fonts.setFont(u8g2_fhpixelfont16px_12_gb2312);           // 设置字体
-  uint16_t datew = u8g2Fonts.getUTF8Width(currentDateString);  // 计算日期字符串宽度
-  uint16_t locationw = u8g2Fonts.getUTF8Width(classLocation);  // 计算地点字符串宽度
+  uint16_t dateW = u8g2Fonts.getUTF8Width(currentDateString);  // 计算日期字符串宽度
+  uint16_t locationW = u8g2Fonts.getUTF8Width(classLocation);  // 计算地点字符串宽度
 
   // 设置刷新模式
   if (partial) {
@@ -234,14 +234,14 @@ void mainDisplay(bool partial) {
     u8g2Fonts.setCursor(209, 14);
     u8g2Fonts.print(batteryVoltageString);
 
-    u8g2Fonts.setCursor(249 - datew, 46);
+    u8g2Fonts.setCursor(249 - dateW, 46);
     u8g2Fonts.print(currentDateString);
     u8g2Fonts.setCursor(2, 120);
     u8g2Fonts.print(classCourse);
-    display.fillRect(249 - locationw, 105, locationw + 1, 17, GxEPD_WHITE);
-    u8g2Fonts.setCursor(250 - locationw, 120);
+    display.fillRect(249 - locationW, 105, locationW + 1, 17, GxEPD_WHITE);
+    u8g2Fonts.setCursor(250 - locationW, 120);
     u8g2Fonts.print(classLocation);
-    display.drawLine(250 - locationw, 121, 249, 121, GxEPD_BLACK);
+    display.drawLine(250 - locationW, 121, 249, 121, GxEPD_BLACK);
     u8g2Fonts.setFont(u8g2_classperiod12px_9_classperiod);
     u8g2Fonts.setCursor(2, 102);
     u8g2Fonts.print(classPeriod);
