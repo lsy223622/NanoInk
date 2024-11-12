@@ -66,10 +66,20 @@ const char qWeatherURL[] = "https://api.example.com/proxyforqweather.php";
 const char qWeatherKey[] = "REDACTED";
 const char qWeatherLocation[] = "000000000";
 const char classTimeAPI[] = "https://api.example.com/class_time.php";
+const int WIFI_RETRY_LIMIT = 5;
+const int HOTSPOT_RETRY_LIMIT = 10;
+const int WIFI_TIMEOUT = 1000;
 
 // enter your hmacKey (10 digits)
 uint8_t hmacKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 TOTP totp = TOTP(hmacKey, 10);
+
+WiFiClientSecure* getSecureClient() {
+  static WiFiClientSecure client;  // 静态对象复用
+  client.setInsecure();
+  client.setTimeout(10);  // 设置10秒超时
+  return &client;
+}
 
 void setup() {
   Serial.begin(115200);   // 初始化串口
@@ -267,6 +277,8 @@ void displaySyncingBadge() {
 
 // 连接WiFi
 int connectWifi() {
+  WiFi.mode(WIFI_STA);  // 显式设置WiFi模式
+
   Serial.println("Connecting to WiFi...");  // 打印日志
 
   // 如果已经连接WiFi，则直接返回
@@ -275,34 +287,32 @@ int connectWifi() {
     return 2;
   }
 
-  // 尝试连接WiFi
+  // 尝试连接主WiFi
   WiFi.begin(wifiSSID, wifiPass);
-  int wifiRetry = 0;
-  while (WiFi.status() != WL_CONNECTED && wifiRetry < 5) {
-    wifiRetry++;                              // 尝试次数加一
-    delay(1000);                              // 延时1秒
-    Serial.println("Connecting to WiFi...");  // 打印日志
-  }
-
-  // 如果连接失败，则尝试连接热点
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(hotspotSSID, hotspotPass);
-    int wifiRetry = 0;
-    while (WiFi.status() != WL_CONNECTED && wifiRetry < 10) {
-      wifiRetry++;
-      delay(1000);
-      Serial.println("Connecting to mobile hotspot...");
+  for (int retry = 0; retry < WIFI_RETRY_LIMIT; retry++) {
+    Serial.println("Connecting to WiFi...");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to WiFi!");
+      return 1;
     }
+    delay(WIFI_TIMEOUT);
   }
 
-  // 如果连接成功，则打印日志并返回
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Connected to WiFi!");
-    return 1;
-  } else {
-    Serial.println("Failed to connect to WiFi.");
-    return 3;
+  // 尝试连接热点
+  WiFi.disconnect();  // 断开之前的连接
+  WiFi.begin(hotspotSSID, hotspotPass);
+  for (int retry = 0; retry < HOTSPOT_RETRY_LIMIT; retry++) {
+    Serial.println("Connecting to mobile hotspot...");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to mobile hotspot!");
+      return 1;
+    }
+    delay(WIFI_TIMEOUT);
   }
+
+  WiFi.disconnect(true);  // 清理WiFi配置
+  Serial.println("Failed to connect to WiFi.");
+  return 3;
 }
 
 // 同步时间
@@ -395,20 +405,27 @@ void updateCurrentWeather() {
 
   Serial.println("Updating current weather...");  // 打印日志
 
-  WiFiClientSecure client;  // 创建WiFi客户端对象
-  client.setInsecure();     // 设置客户端为不安全模式
-  HTTPClient httpClient;    // 创建HTTP客户端对象
+  WiFiClientSecure* client = getSecureClient();
+  HTTPClient http;
 
   String requestUrl = String(qWeatherURL) + "?location=" + String(qWeatherLocation) + "&key=" + String(qWeatherKey);  // 拼接请求URL
 
+  if (!http.begin(*client, requestUrl)) {
+    Serial.println("HTTP setup failed");
+    return;
+  }
+
+  http.setTimeout(10000);  // 10秒超时
+
   // 发送GET请求以获取天气数据
-  if (httpClient.begin(requestUrl)) {
-    u8_t httpCode = httpClient.GET();  // 发送GET请求
+  try {
+    int httpCode = http.GET();  // 发送GET请求
 
     // 如果请求成功，则解析JSON数据
     if (httpCode == HTTP_CODE_OK) {
       String payload = httpClient.getString();                     // 获取响应内容
-      DynamicJsonDocument doc(1024);                               // 创建JSON文档
+      const size_t JSON_CAPACITY = 2048;                           // 更大的缓冲区
+      StaticJsonDocument<JSON_CAPACITY> doc;                       // 使用静态分配，避免堆内存碎片
       DeserializationError error = deserializeJson(doc, payload);  // 解析JSON数据
 
       // 如果解析失败，则打印日志并返回
@@ -439,11 +456,11 @@ void updateCurrentWeather() {
     } else {
       Serial.printf("Connect to weather api server failed, the http status code is:%u\n", httpCode);  // 打印日志
     }
-  } else {
-    Serial.println("Get current weather failed");  // 打印日志
+  } catch (const std::exception& e) {
+    Serial.printf("HTTP request failed: %s\n", e.what());
+    Serial.println("Get current weather failed");
   }
-  httpClient.end();  // 关闭HTTP客户端
-  client.stop();     // 关闭WiFi客户端
+  http.end();  // 关闭HTTP客户端
 }
 
 // 更新课程表
@@ -519,12 +536,30 @@ void print_wakeup_reason() {
 
 // 进入深度睡眠模式，直到下一个整点
 void deepSleep2NextWholeMinute() {
-  now = rtc.now();                                       // 更新时间
-  uint64_t sleepTime = (60 - now.second()) * 1000;       // 计算睡眠时间（精确到秒）
-  sleepTime += 1000 - (esp_timer_get_time() % 1000);     // 计算睡眠时间（精确到微秒）
-  Serial.printf("Sleeping for %llu ms\r\n", sleepTime);  // 打印日志
-  esp_sleep_enable_timer_wakeup(sleepTime * 1000ULL);    // 设置睡眠时间
-  esp_deep_sleep_start();                                // 进入深度睡眠模式
+  now = rtc.now();
+
+  // 添加安全检查
+  if (now.second() >= 60) {
+    Serial.println("Invalid RTC time!");
+    esp_restart();  // 重启设备
+    return;
+  }
+
+  uint64_t sleepTime = (60 - now.second()) * 1000ULL;
+  sleepTime += (1000ULL - (esp_timer_get_time() % 1000ULL));
+
+  // 添加合理范围检查
+  if (sleepTime > 61000ULL || sleepTime < 1000ULL) {
+    Serial.printf("Invalid sleep time: %llu ms\n", sleepTime);
+    sleepTime = 60000ULL;  // 使用默认值
+  }
+
+  // 清理资源
+  WiFi.disconnect(true);
+  display.hibernate();
+
+  esp_sleep_enable_timer_wakeup(sleepTime * 1000ULL);
+  esp_deep_sleep_start();
 }
 
 // 写入文件
@@ -655,4 +690,21 @@ void delFirstLine(char* path) {
   } else {
     Serial.println("Failed to open file for writing");  // 打印日志
   }
+}
+
+// 建议添加文件系统检查和错误恢复机制
+bool initFileSystem() {
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS initialization failed!");
+
+    // 尝试格式化并重新挂载
+    if (SPIFFS.format()) {
+      if (SPIFFS.begin(true)) {
+        Serial.println("SPIFFS formatted and mounted successfully");
+        return true;
+      }
+    }
+    return false;
+  }
+  return true;
 }
