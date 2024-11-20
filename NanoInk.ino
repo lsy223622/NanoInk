@@ -156,20 +156,23 @@ void setup() {
   u8g2Fonts.setForegroundColor(GxEPD_BLACK);  // 设置前景色
   u8g2Fonts.setBackgroundColor(GxEPD_WHITE);  // 设置背景色
 
-  now = rtc.now();  // 更新时间
+  DateTime temp = rtc.now();
+  now = std::move(temp);  // 更新时间
 
   // 如果课程结束时间小于当前时间，则更新课程
   while (getTimeStamp(classEndTime) < now.unixtime()) {
-    delFirstLine("/classtimetable.csv");  // 删除第一行
-    updateClass();                        // 更新课程
+    static const char* filename = "/classtimetable.csv";
+    delFirstLine(const_cast<char*>(filename));  // 删除第一行
+    updateClass();                              // 更新课程
   }
 
   mainDisplay(now.minute() % 30 != 0);  // 更新屏幕
 
   // 每小时联网同步数据
   if (now.minute() == 0 && connectWifi() < 3) {
-    displaySyncingBadge();                                                                         // 每小时联网同步时间
-    now = rtc.now();                                                                               // 更新时间
+    displaySyncingBadge();  // 每小时联网同步时间
+    DateTime temp = rtc.now();
+    now = std::move(temp);                                                                         // 更新时间
     if (now.hour() == 12 && now.minute() == 0) syncTime();                                         // 每天12点联网同步时间
     if (now.dayOfTheWeek() == 0 && now.hour() == 12 && now.minute() == 0) updateClassTimeTable();  // 每周日12点联网同步课程表
     updateCurrentWeather();                                                                        // 每小时联网同步天气
@@ -189,7 +192,8 @@ void mainDisplay(bool partial) {
 
   updateBatteryVoltage();  // 更新电池电压
 
-  now = rtc.now();                                                                                              // 更新时间
+  DateTime temp = rtc.now();
+  now = std::move(temp);                                                                                        // 更新时间
   char currentDateString[27];                                                                                   // 日期格式：2021-01-01 星期一
   sprintf(currentDateString, "%4d-%d-%d %s", now.year(), now.month(), now.day(), WEEKDAY[now.dayOfTheWeek()]);  // 生成日期字符串
   char currentTimeString[8];                                                                                    // 时间格式：00:00
@@ -383,7 +387,8 @@ void updateClass() {
 
   strncpy(classLocation, subStringX(location, 7).c_str(), 12);  // 裁剪过长的地点名
 
-  now = rtc.now();  // 更新时间
+  DateTime temp = rtc.now();
+  now = std::move(temp);  // 更新时间
 
   // 如果课程开始时间大于当前时间，说明现在是下课，将课程开始时间设置为 2023-01-01 00:00:00
   if (getTimeStamp(classStartTime) > now.unixtime()) {
@@ -424,8 +429,7 @@ void updateCurrentWeather() {
     // 如果请求成功，则解析JSON数据
     if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();                           // 获取响应内容
-      const size_t JSON_CAPACITY = 2048;                           // 更大的缓冲区
-      StaticJsonDocument<JSON_CAPACITY> doc;                       // 使用静态分配，避免堆内存碎片
+      JsonDocument doc;                                            // 使用静态分配，避免堆内存碎片
       DeserializationError error = deserializeJson(doc, payload);  // 解析JSON数据
 
       // 如果解析失败，则打印日志并返回
@@ -496,8 +500,18 @@ void updateClassTimeTable() {
 
 // 将时间字符串转换为时间戳
 time_t getTimeStamp(char* timeString) {
-  char format[] = "%Y-%m-%d %H:%M:%S";      // 定义时间格式
-  struct tm timeinfo = { 0 };               // 定义时间结构体
+  char format[] = "%Y-%m-%d %H:%M:%S";  // 定义时间格式
+  struct tm timeinfo = {
+    .tm_sec = 0,
+    .tm_min = 0,
+    .tm_hour = 0,
+    .tm_mday = 0,
+    .tm_mon = 0,
+    .tm_year = 0,
+    .tm_wday = 0,
+    .tm_yday = 0,
+    .tm_isdst = 0
+  };                                        // 定义时间结构体
   strptime(timeString, format, &timeinfo);  // 将时间字符串转换为时间结构体
   time_t timeStamp = mktime(&timeinfo);     // 将时间结构体转换为时间戳
   return timeStamp;                         // 返回时间戳
@@ -536,7 +550,8 @@ void print_wakeup_reason() {
 
 // 进入深度睡眠模式，直到下一个整点
 void deepSleep2NextWholeMinute() {
-  now = rtc.now();
+  DateTime temp = rtc.now();
+  now = std::move(temp);
 
   // 添加安全检查
   if (now.second() >= 60) {
