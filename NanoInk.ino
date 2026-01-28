@@ -85,6 +85,10 @@ void setup() {
   Serial.begin(115200);   // 初始化串口
   print_wakeup_reason();  // 打印睡眠唤醒原因
 
+  // 记录是否从深度睡眠唤醒
+  const esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  const bool wokeFromDeepSleep = (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED);
+
 // 初始化屏幕
 #if defined(ESP32) && defined(USE_HSPI_FOR_EPD)
   hspi.begin(13, 12, 14, 15);  // remap hspi for EPD (swap pins)
@@ -146,7 +150,8 @@ void setup() {
     updateClass();  // 更新课程
   }
 
-  display.init(115200, false, 10, false);     // 初始化屏幕
+  // 若为深度睡眠唤醒，强制进行显示控制器初始化，避免局部刷新无效
+  display.init(115200, wokeFromDeepSleep, 10, false);  // 初始化屏幕
   display.setRotation(1);                     // 设置屏幕旋转方向，分别有0，1，2，3这四个方向
   display.setTextWrap(false);                 // 设置文本是否自动换行，false则为不自动换行，如果文本溢出则显示异常或者不显示
   display.setTextColor(GxEPD_BLACK);          // 设置 文本颜色
