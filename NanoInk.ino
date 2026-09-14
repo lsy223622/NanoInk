@@ -8,6 +8,7 @@
 #include <SPIFFS.h>
 #include <TOTP.h>
 #include <RTClib.h>
+#include <sys/time.h>
 
 #define ENABLE_GxEPD2_GFX 0
 #define USE_HSPI_FOR_EPD
@@ -57,26 +58,25 @@ RTC_DATA_ATTR bool serverConnected = false;  // 服务器连接状态
 
 const char* WEEKDAY[] = { "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };  // 星期数组
 
-// 自定义设置
-const char wifiSSID[] = "REDACTED";
-const char wifiPass[] = "REDACTED";
-const char hotspotSSID[] = "REDACTED";
-const char hotspotPass[] = "REDACTED";
-const char qWeatherURL[] = "https://api.example.com/proxyforqweather.php";
-const char qWeatherKey[] = "REDACTED";
-const char qWeatherLocation[] = "000000000";
-const char classTimeAPI[] = "https://api.example.com/class_time.php";
+#include "config.local.h"
+
 const int WIFI_RETRY_LIMIT = 5;
 const int HOTSPOT_RETRY_LIMIT = 10;
 const int WIFI_TIMEOUT = 1000;
-
-// enter your hmacKey (10 digits)
-uint8_t hmacKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-TOTP totp = TOTP(hmacKey, 10);
+TOTP totp(hmacKey, sizeof(hmacKey));
 
 WiFiClientSecure* getSecureClient() {
   static WiFiClientSecure client;  // 静态对象复用
-  client.setInsecure();
+  if (apiRootCA[0] == '\0') {
+    Serial.println("Configure apiRootCA before using HTTPS.");
+    return nullptr;
+  }
+  DateTime localTime = rtc.now();
+  if (rtc.lostPower() || !localTime.isValid()) return nullptr;
+  // The DS3231 stores UTC+8; TLS uses the system clock in UTC.
+  timeval utc = { static_cast<time_t>(localTime.unixtime() - 8 * 3600), 0 };
+  settimeofday(&utc, nullptr);
+  client.setCACert(apiRootCA);
   client.setTimeout(10);  // 设置10秒超时
   return &client;
 }
@@ -106,11 +106,6 @@ void setup() {
     Serial.println("RTC initialization failed!");
     while (1) {};
   }
-
-  // if (rtc.lostPower()) {
-  //   Serial.println("RTC lost power, let's set the time!");
-  //   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  // }
 
   // 只有第一次启动会触发，清屏联网同步数据
   if (firstBoot) {
@@ -146,8 +141,6 @@ void setup() {
       updateCurrentWeather();  // 更新天气
       updateClassTimeTable();  // 更新课程表
     }
-
-    updateClass();  // 更新课程
   }
 
   // 若为深度睡眠唤醒，强制进行显示控制器初始化，避免局部刷新无效
@@ -164,12 +157,7 @@ void setup() {
   DateTime temp = rtc.now();
   now = std::move(temp);  // 更新时间
 
-  // 如果课程结束时间小于当前时间，则更新课程
-  while (getTimeStamp(classEndTime) < now.unixtime()) {
-    static const char* filename = "/classtimetable.csv";
-    delFirstLine(const_cast<char*>(filename));  // 删除第一行
-    updateClass();                              // 更新课程
-  }
+  updateClass();
 
   mainDisplay(now.minute() % 30 != 0);  // 更新屏幕
 
@@ -178,8 +166,11 @@ void setup() {
     displaySyncingBadge();  // 每小时联网同步时间
     DateTime temp = rtc.now();
     now = std::move(temp);                                                                         // 更新时间
-    if (now.hour() == 12 && now.minute() == 0) syncTime();                                         // 每天12点联网同步时间
-    if (now.dayOfTheWeek() == 0 && now.hour() == 12 && now.minute() == 0) updateClassTimeTable();  // 每周日12点联网同步课程表
+    if (rtc.lostPower() || !now.isValid() || now.hour() == 12) syncTime();
+    if (now.dayOfTheWeek() == 0 && now.hour() == 12 && now.minute() == 0) {
+      updateClassTimeTable();
+      updateClass();
+    }
     updateCurrentWeather();                                                                        // 每小时联网同步天气
     mainDisplay(true);                                                                             // 更新屏幕
   }
@@ -200,14 +191,14 @@ void mainDisplay(bool partial) {
   DateTime temp = rtc.now();
   now = std::move(temp);                                                                                        // 更新时间
   char currentDateString[27];                                                                                   // 日期格式：2021-01-01 星期一
-  sprintf(currentDateString, "%4d-%d-%d %s", now.year(), now.month(), now.day(), WEEKDAY[now.dayOfTheWeek()]);  // 生成日期字符串
+  snprintf(currentDateString, sizeof(currentDateString), "%4d-%d-%d %s", now.year(), now.month(), now.day(), WEEKDAY[now.dayOfTheWeek()]);  // 生成日期字符串
   char currentTimeString[8];                                                                                    // 时间格式：00:00
-  sprintf(currentTimeString, "%02d:%02d", now.hour(), now.minute());                                            // 生成时间字符串
+  snprintf(currentTimeString, sizeof(currentTimeString), "%02d:%02d", now.hour(), now.minute());                                            // 生成时间字符串
 
   char totpCode[7] = "";                                      // TOTP动态验证码
-  Serial.println(now.unixtime() - 8 * 3600);                  // 东八区时间戳
-  strcpy(totpCode, totp.getCode(now.unixtime() - 8 * 3600));  // 生成动态验证码
-  Serial.println(totpCode);                                   // 打印动态验证码
+  if (!rtc.lostPower() && now.isValid()) {
+    snprintf(totpCode, sizeof(totpCode), "%s", totp.getCode(now.unixtime() - 8 * 3600));
+  }
 
   u8g2Fonts.setFont(u8g2_fhpixelfont16px_12_gb2312);           // 设置字体
   uint16_t dateW = u8g2Fonts.getUTF8Width(currentDateString);  // 计算日期字符串宽度
@@ -273,6 +264,7 @@ void displaySyncingBadge() {
   Serial.println("Display syncing badge.");           // 打印日志
   u8g2Fonts.setFont(u8g2_fhpixelfont16px_12_gb2312);  // 设置字体
   display.setPartialWindow(143, 0, 109, 18);          // 设置局部刷新区域
+  display.firstPage();
   do {
     display.fillRect(143, 0, 109, 18, GxEPD_WHITE);
     u8g2Fonts.setCursor(146, 14);
@@ -326,216 +318,220 @@ int connectWifi() {
 
 // 同步时间
 void syncTime() {
-  Serial.println("Syncing time...");  // 打印日志
-
-  timeClient.begin();        // 启动NTP客户端
-  timeClient.forceUpdate();  // 强制更新时间
-
-  // 尝试同步时间，最多尝试10次
-  int16_t syncCount = 0;
-  while (syncCount < 10 && timeClient.getEpochTime() < 100) {
-    Serial.println("Trying to sync time...");  // 打印日志
-    timeClient.forceUpdate();                  // 强制更新时间
-    syncCount++;                               // 尝试次数加一
+  Serial.println("Syncing time...");
+  timeClient.begin();
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    if (timeClient.forceUpdate()) {
+      DateTime synced(timeClient.getEpochTime());
+      if (synced.isValid()) {
+        rtc.adjust(synced);
+        timeClient.end();
+        Serial.println("DS3231 time updated from NTP");
+        return;
+      }
+    }
   }
-
-  // 如果同步失败，则打印日志并返回
-  if (syncCount == 10) {
-    Serial.println("Failed to sync time.");
-    return;
-  }
-
-  rtc.adjust(DateTime(timeClient.getEpochTime()));  // 更新RTC时间
-  Serial.println("DS3231 time updated from NTP");   // 打印日志
+  timeClient.end();
+  Serial.println("Failed to sync time; keeping RTC time.");
 }
 
-// 更新课程
+bool parseClassLine(String line, String fields[]) {
+  line.trim();
+  int begin = 0;
+  for (int i = 0; i < 5; ++i) {
+    int end = line.indexOf(',', begin);
+    if ((i < 4 && end < 0) || (i == 4 && end >= 0)) return false;
+    fields[i] = i < 4 ? line.substring(begin, end) : line.substring(begin);
+    fields[i].trim();
+    if (fields[i].startsWith("\"") && fields[i].endsWith("\"") && fields[i].length() >= 2) {
+      fields[i] = fields[i].substring(1, fields[i].length() - 1);
+    }
+    if (fields[i].isEmpty() || fields[i].indexOf('"') >= 0) return false;
+    begin = end + 1;
+  }
+  time_t start = getTimeStamp(fields[1].c_str());
+  time_t end = getTimeStamp(fields[2].c_str());
+  return start != 0 && end > start;
+}
+
+// Read the first unexpired record without modifying the cached timetable.
 void updateClass() {
-  File file = SPIFFS.open("/classtimetable.csv", FILE_READ);  // 打开文件
+  classStartTime[0] = '\0';
+  classEndTime[0] = '\0';
+  snprintf(classCourse, sizeof(classCourse), "暂无课程");
+  classLocation[0] = '\0';
+  classPeriod[0] = '\0';
+  now = rtc.now();
+  if (rtc.lostPower() || !now.isValid()) return;
+  File file = SPIFFS.open("/classtimetable.csv", FILE_READ);
+  if (!file) file = SPIFFS.open("/classtimetable.bak", FILE_READ);
+  if (!file) return;
 
-  // 如果文件不存在，则打印日志并返回
-  if (!file) {
-    Serial.println("Failed to open file for reading");
-    return;
+  while (file.available()) {
+    String fields[5];
+    if (!parseClassLine(file.readStringUntil('\n'), fields)) continue;
+    time_t start = getTimeStamp(fields[1].c_str());
+    time_t end = getTimeStamp(fields[2].c_str());
+    if (end <= now.unixtime()) continue;
+    snprintf(classStartTime, sizeof(classStartTime), "%s", fields[1].c_str());
+    snprintf(classEndTime, sizeof(classEndTime), "%s", fields[2].c_str());
+    String course = subStringX(fields[3], 13, sizeof(classCourse) - 1);
+    if (course != fields[3]) course = subStringX(fields[3], 12, sizeof(classCourse) - 4) + "…";
+    snprintf(classCourse, sizeof(classCourse), "%s", course.c_str());
+    snprintf(classLocation, sizeof(classLocation), "%s",
+             subStringX(fields[4], 7, sizeof(classLocation) - 1).c_str());
+    if (start > now.unixtime()) {
+      snprintf(classPeriod, sizeof(classPeriod), "下一节: %.5s", classStartTime + 11);
+    } else {
+      snprintf(classPeriod, sizeof(classPeriod), "%.5s - %.5s", classStartTime + 11, classEndTime + 11);
+    }
+    break;
   }
-
-  String firstLine = file.readStringUntil('\n');  // 读取第一行
-
-  file.close();  // 关闭文件
-
-  // 解析CSV格式的数据
-  String class_no, start_time, end_time, course, location;  // 定义变量
-  int comma1 = firstLine.indexOf(',');                      // 查找第一个逗号
-  int comma2 = firstLine.indexOf(',', comma1 + 1);          // 查找第二个逗号
-  int comma3 = firstLine.indexOf(',', comma2 + 1);          // 查找第三个逗号
-  int comma4 = firstLine.indexOf(',', comma3 + 1);          // 查找第四个逗号
-
-  class_no = firstLine.substring(0, comma1);             // 从第一个字符开始截取到第一个逗号
-  start_time = firstLine.substring(comma1 + 1, comma2);  // 从第一个逗号后一个字符开始截取到第二个逗号
-  end_time = firstLine.substring(comma2 + 1, comma3);    // 从第二个逗号后一个字符开始截取到第三个逗号
-  course = firstLine.substring(comma3 + 1, comma4);      // 从第三个逗号后一个字符开始截取到第四个逗号
-  location = firstLine.substring(comma4 + 1);            // 从第四个逗号后一个字符开始截取到最后一个字符
-
-  start_time.replace("\"", "");  // 去除引号
-  end_time.replace("\"", "");    // 去除引号
-  location.replace("\"", "");    // 去除引号
-
-  strncpy(classStartTime, start_time.substring(0, 19).c_str(), 19);  // 截取字符串
-  strncpy(classEndTime, end_time.substring(0, 19).c_str(), 19);      // 截取字符串
-
-  // 裁剪过长的课程名
-  if (subStringX(course, 13) == course) {
-    strncpy(classCourse, course.c_str(), 39);
-  } else {
-    strncpy(classCourse, (subStringX(course, 13) + "…").c_str(), 39);
-  }
-
-  strncpy(classLocation, subStringX(location, 7).c_str(), 12);  // 裁剪过长的地点名
-
-  DateTime temp = rtc.now();
-  now = std::move(temp);  // 更新时间
-
-  // 如果课程开始时间大于当前时间，说明现在是下课，将课程开始时间设置为 2023-01-01 00:00:00
-  if (getTimeStamp(classStartTime) > now.unixtime()) {
-    strncpy(classEndTime, classStartTime, 19);
-    strncpy(classStartTime, "2023-01-01 00:00:00", 20);
-  }
-
-  // 判断当前是否上课
-  if (String(classStartTime) == "2023-01-01 00:00:00") {
-    strncpy(classPeriod, ("下一节: " + String(classEndTime).substring(11, 16)).c_str(), 16);  // 如果当前不上课，则显示下一节课的开始时间
-  } else {
-    strncpy(classPeriod, (String(classStartTime).substring(11, 16) + " - " + String(classEndTime).substring(11, 16)).c_str(), 16);  // 如果当前上课，则显示当前课程的开始时间和结束时间
-  }
+  file.close();
 }
 
 // 更新天气
 void updateCurrentWeather() {
-  serverConnected = false;  // 将服务器连接状态设置为false
-
-  Serial.println("Updating current weather...");  // 打印日志
-
+  serverConnected = false;
   WiFiClientSecure* client = getSecureClient();
+  if (!client) return;
   HTTPClient http;
-
-  String requestUrl = String(qWeatherURL) + "?location=" + String(qWeatherLocation) + "&key=" + String(qWeatherKey);  // 拼接请求URL
-
-  if (!http.begin(*client, requestUrl)) {
-    Serial.println("HTTP setup failed");
-    return;
-  }
-
-  http.setTimeout(10000);  // 10秒超时
-
-  // 发送GET请求以获取天气数据
-  try {
-    int httpCode = http.GET();  // 发送GET请求
-
-    // 如果请求成功，则解析JSON数据
-    if (httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();                           // 获取响应内容
-      JsonDocument doc;                                            // 使用静态分配，避免堆内存碎片
-      DeserializationError error = deserializeJson(doc, payload);  // 解析JSON数据
-
-      // 如果解析失败，则打印日志并返回
-      if (error) {
-        Serial.print("deserializeJson() failed: ");
-        Serial.println(error.c_str());
-        return;
-      }
-
-      // 如果解析成功，则将数据写入变量
-      if (doc["code"].as<String>() == "200") {
-        JsonObject now = doc["now"];                                      // 获取当前天气数据
-        qWeatherTemp = atoi(now["temp"].as<String>().c_str());            // "4"
-        strcpy(qWeatherText, now["text"].as<String>().c_str());           // "晴"
-        strcpy(qWeatherWindDir, now["windDir"].as<String>().c_str());     // "西南风"
-        qWeatherWindScale = atoi(now["windScale"].as<String>().c_str());  // "3"
-        qWeatherHumidity = atoi(now["humidity"].as<String>().c_str());    // "16"
-
-        char windScale[10] = "";                                                    // 风力等级
-        if (qWeatherWindScale != 0) sprintf(windScale, "%d级", qWeatherWindScale);  // 如果风力等级不为0，则拼接风力等级字符串
-
-        sprintf(qWeatherString1, "%.6s%d℃", qWeatherText, qWeatherTemp);  // 拼接天气字符串
-        sprintf(qWeatherString2, "%s%s", qWeatherWindDir, windScale);     // 拼接风向字符串
-        sprintf(qWeatherString3, "湿度%d%%", qWeatherHumidity);           // 拼接湿度字符串
-
-        serverConnected = true;  // 将服务器连接状态设置为true
-      }
-    } else {
-      Serial.printf("Connect to weather api server failed, the http status code is:%u\n", httpCode);  // 打印日志
-    }
-  } catch (const std::exception& e) {
-    Serial.printf("HTTP request failed: %s\n", e.what());
-    Serial.println("Get current weather failed");
-  }
-  http.end();  // 关闭HTTP客户端
-}
-
-// 更新课程表
-void updateClassTimeTable() {
-  File file = SPIFFS.open("/classtimetable.csv", FILE_WRITE);  // 创建SPIFFS文件
-
-  // 如果文件不存在，则打印日志并返回
-  if (!file) {
-    Serial.println("无法写入文件");
-    return;
-  }
-
-  WiFiClientSecure client;  // 创建WiFi客户端对象
-  client.setInsecure();     // 设置客户端为不安全模式
-  HTTPClient httpClient;    // 创建HTTP客户端对象
-
-  httpClient.begin("https://api.example.com/class_time_csv.php");  // 发送GET请求以下载CSV文件
-  u8_t httpCode = httpClient.GET();                                  // 发送GET请求
-
-  // 如果请求成功，则将数据写入文件
+  String requestUrl = String(qWeatherURL) + "?location=" + qWeatherLocation + "&key=" + qWeatherKey;
+  if (!requestUrl.startsWith("https://") || !http.begin(*client, requestUrl)) return;
+  http.setTimeout(10000);
+  int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
-    file.seek(0, SeekSet);            // 将文件指针移动到文件开头
-    httpClient.writeToStream(&file);  // 将响应内容写入文件
-    Serial.println("文件下载成功");   // 打印日志
-  } else {
-    Serial.printf("文件下载失败，HTTP错误代码：%d\n", httpCode);  // 打印日志
-  }
-
-  httpClient.end();  // 关闭HTTP客户端
-  client.stop();     // 关闭WiFi客户端
-  file.close();      // 关闭文件
-}
-
-// 将时间字符串转换为时间戳
-time_t getTimeStamp(char* timeString) {
-  char format[] = "%Y-%m-%d %H:%M:%S";  // 定义时间格式
-  struct tm timeinfo = {
-    .tm_sec = 0,
-    .tm_min = 0,
-    .tm_hour = 0,
-    .tm_mday = 0,
-    .tm_mon = 0,
-    .tm_year = 0,
-    .tm_wday = 0,
-    .tm_yday = 0,
-    .tm_isdst = 0
-  };                                        // 定义时间结构体
-  strptime(timeString, format, &timeinfo);  // 将时间字符串转换为时间结构体
-  time_t timeStamp = mktime(&timeinfo);     // 将时间结构体转换为时间戳
-  return timeStamp;                         // 返回时间戳
-}
-
-// 截取字符串前length个字符
-String subStringX(String str, int length) {
-  String subStringX = "";  // 存储截取后的字符串
-  int count = 0;           // 记录已输出的字符数
-
-  // 遍历字符串
-  for (auto it = str.begin(); it != str.end() && count < length; ++it) {
-    if ((*it & 0xC0) != 0x80) {        // 如果当前字符是一个多字节字符的第一个字节
-      if (count == length - 1) break;  // 如果该字符是第length个字符，则直接退出循环
-      count++;                         // 已输出字符数加一
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, http.getString());
+    if (!error && doc["code"].as<String>() == "200") {
+      JsonObject weather = doc["now"];
+      int temp, scale, humidity, scaleUpper;
+      String scaleText = weather["windScale"].as<String>();
+      int dash = scaleText.indexOf('-');
+      bool validScale = scaleText.length() <= 5 && parseWeatherNumber(dash < 0 ? scaleText : scaleText.substring(0, dash), 0, 17, scale);
+      if (dash >= 0) {
+        validScale = validScale && parseWeatherNumber(scaleText.substring(dash + 1), scale, 17, scaleUpper);
+      }
+      const char* text = weather["text"];
+      const char* direction = weather["windDir"];
+      if (text && direction && strlen(text) < sizeof(qWeatherText) &&
+          strlen(direction) < sizeof(qWeatherWindDir) &&
+          parseWeatherNumber(weather["temp"].as<String>(), -100, 100, temp) &&
+          validScale &&
+          parseWeatherNumber(weather["humidity"].as<String>(), 0, 100, humidity)) {
+        qWeatherTemp = temp;
+        qWeatherWindScale = scale;
+        qWeatherHumidity = humidity;
+        snprintf(qWeatherText, sizeof(qWeatherText), "%s", text);
+        snprintf(qWeatherWindDir, sizeof(qWeatherWindDir), "%s", direction);
+        char windScale[10] = "";
+        if (scale != 0 || dash >= 0) snprintf(windScale, sizeof(windScale), "%s级", scaleText.c_str());
+        snprintf(qWeatherString1, sizeof(qWeatherString1), "%s%d℃",
+                 subStringX(String(text), 2, 6).c_str(), temp);
+        snprintf(qWeatherString2, sizeof(qWeatherString2), "%s%s", direction, windScale);
+        snprintf(qWeatherString3, sizeof(qWeatherString3), "湿度%d%%", humidity);
+        serverConnected = true;
+      }
     }
-    subStringX += *it;  // 将当前字符添加到截取后的字符串中
+  } else {
+    Serial.printf("Weather HTTP status: %d\n", httpCode);
   }
-  return subStringX;  // 返回截取后的字符串
+  http.end();
+}
+
+bool parseWeatherNumber(String text, int minimum, int maximum, int& result) {
+  char* end = nullptr;
+  long number = strtol(text.c_str(), &end, 10);
+  if (end == text.c_str() || *end != '\0' || number < minimum || number > maximum) return false;
+  result = static_cast<int>(number);
+  return true;
+}
+
+void updateClassTimeTable() {
+  WiFiClientSecure* client = getSecureClient();
+  if (!client) return;
+  HTTPClient http;
+  if (!String(classTimeAPI).startsWith("https://") || !http.begin(*client, classTimeAPI)) return;
+  http.setTimeout(10000);
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("Timetable HTTP status: %d\n", httpCode);
+    http.end();
+    return;
+  }
+  const char* temporaryPath = "/classtimetable.tmp";
+  File file = SPIFFS.open(temporaryPath, FILE_WRITE);
+  if (!file) { http.end(); return; }
+  int expected = http.getSize();
+  int written = http.writeToStream(&file);
+  bool complete = written >= 0 && (expected < 0 || written == expected) &&
+                  static_cast<size_t>(written) == file.size();
+  file.close();
+  http.end();
+  file = SPIFFS.open(temporaryPath, FILE_READ);
+  bool valid = complete && static_cast<bool>(file);
+  time_t previousStart = 0;
+  while (valid && file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) continue;
+    String fields[5];
+    valid = parseClassLine(line, fields);
+    if (valid) {
+      time_t start = getTimeStamp(fields[1].c_str());
+      valid = start >= previousStart;
+      previousStart = start;
+    }
+  }
+  file.close();
+  const char* cachedPath = "/classtimetable.csv";
+  const char* backupPath = "/classtimetable.bak";
+  bool hadCache = SPIFFS.exists(cachedPath);
+  // SPIFFS cannot rename onto an existing file. Keep the old cache until promotion succeeds.
+  if (valid && hadCache) {
+    if (SPIFFS.exists(backupPath)) valid = SPIFFS.remove(backupPath);
+    if (valid) valid = SPIFFS.rename(cachedPath, backupPath);
+  }
+  if (valid && SPIFFS.rename(temporaryPath, cachedPath)) {
+    SPIFFS.remove(backupPath);
+    Serial.println("Timetable updated.");
+    return;
+  }
+  if (hadCache && !SPIFFS.exists(cachedPath)) SPIFFS.rename(backupPath, cachedPath);
+  SPIFFS.remove(temporaryPath);
+  Serial.println("Timetable update failed; keeping cached data.");
+}
+
+// Parse local wall time with RTClib, matching the UTC+8 DS3231 convention.
+time_t getTimeStamp(const char* text) {
+  if (strlen(text) != 19) return 0;
+  for (int i = 0; i < 19; ++i) {
+    char separator = i == 4 || i == 7 ? '-' : i == 10 ? ' ' : i == 13 || i == 16 ? ':' : '\0';
+    if (separator ? text[i] != separator : text[i] < '0' || text[i] > '9') return 0;
+  }
+  int year, month, day, hour, minute, second;
+  if (sscanf(text, "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6 ||
+      year < 2000 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 ||
+      hour > 23 || minute > 59 || second > 59) return 0;
+  DateTime parsed(year, month, day, hour, minute, second);
+  return parsed.isValid() ? parsed.unixtime() : 0;
+}
+
+String subStringX(String str, int length, size_t maxBytes) {
+  size_t end = 0;
+  int count = 0;
+  while (end < str.length() && count < length) {
+    uint8_t lead = static_cast<uint8_t>(str[end]);
+    size_t bytes = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 :
+                   (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 0;
+    if (bytes == 0 || end + bytes > str.length() || end + bytes > maxBytes) break;
+    for (size_t i = 1; i < bytes; ++i) {
+      if ((static_cast<uint8_t>(str[end + i]) & 0xC0) != 0x80) return str.substring(0, end);
+    }
+    end += bytes;
+    ++count;
+  }
+  return str.substring(0, end);
 }
 
 // 打印睡眠唤醒原因
@@ -582,95 +578,15 @@ void deepSleep2NextWholeMinute() {
   esp_deep_sleep_start();
 }
 
-// 写入文件
-void writeFile(const char* path, const char* content) {
-  Serial.printf("Writing to file: %s\n", path);  // 打印日志
-
-  File file = SPIFFS.open(path, FILE_WRITE);  // 打开文件
-
-  // 如果文件不存在，则打印日志并返回
-  if (!file) {
-    Serial.println("Failed to open file for writing");
-    return;
-  }
-
-  // 如果写入成功，则打印日志
-  if (file.print(content)) {
-    Serial.println("File written successfully");
-  } else {
-    Serial.println("Write failed");
-  }
-
-  file.close();  // 关闭文件
-}
-
-// 读取文件
-void readFile(const char* path) {
-  Serial.printf("Reading file: %s\n", path);  // 打印日志
-
-  File file = SPIFFS.open(path, FILE_READ);  // 打开文件
-
-  // 如果文件不存在，则打印日志并返回
-  if (!file) {
-    Serial.println("Failed to open file for reading");
-    return;
-  }
-
-  // 如果文件存在，则打印文件内容
-  Serial.println("File content:");
-  while (file.available()) {
-    Serial.print((char)file.read());
-  }
-  Serial.println();
-
-  file.close();  // 关闭文件
-}
-
-// 下载文件
-void downloadFile(const char* url, const char* path) {
-  HTTPClient http;  // 创建HTTP客户端对象
-
-  Serial.print("Downloading file from URL: ");  // 打印日志
-  Serial.println(url);                          // 打印日志
-
-  // 发送GET请求以下载文件
-  if (http.begin(url)) {
-    int httpCode = http.GET();
-
-    // 如果请求成功，则将响应内容写入文件
-    if (httpCode > 0) {
-      if (httpCode == HTTP_CODE_OK) {
-        File file = SPIFFS.open(path, FILE_WRITE);
-        if (file) {
-          http.writeToStream(&file);
-          file.close();
-          Serial.println("File downloaded and saved to SPIFFS");
-        } else {
-          Serial.println("Failed to open file for writing");
-        }
-      } else {
-        Serial.print("HTTP request failed with error code: ");
-        Serial.println(httpCode);
-      }
-    } else {
-      Serial.println("Connection failed");
-    }
-
-    http.end();
-  } else {
-    Serial.println("HTTP client setup failed");
-  }
-}
-
 // 更新电池电压
 void updateBatteryVoltage() {
   int voltageADC = analogRead(36);                               // 读取ADC值
   float batteryVoltageRead = voltageADC * 1.1 / 455;             // 将读取到的ADC值转换为电压值
   Serial.print("Battery voltage: ");                             // 打印电压值
   char batteryVoltagePrecise[8];                                 // 定义电压值字符串
-  sprintf(batteryVoltagePrecise, "%5.4fV", batteryVoltageRead);  // 将电压值转换为字符串
+  snprintf(batteryVoltagePrecise, sizeof(batteryVoltagePrecise), "%5.4fV", batteryVoltageRead);  // 将电压值转换为字符串
   Serial.println(String(batteryVoltagePrecise));                 // 打印电压值
-  sprintf(batteryVoltageString, "%3.2fV", batteryVoltageRead);   // 将电压值转换为字符串
+  snprintf(batteryVoltageString, sizeof(batteryVoltageString), "%3.2fV", batteryVoltageRead);   // 将电压值转换为字符串
 }
 
 // 解析日期时间字符串
@@ -678,38 +594,6 @@ DateTime parseDateTime(const char* dateTimeStr) {
   int year, month, day, hour, minute, second;                                              // 定义变量
   sscanf(dateTimeStr, "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second);  // 解析日期时间字符串
   return DateTime(year, month, day, hour, minute, second);                                 // 返回DateTime对象
-}
-
-// 删除文件第一行
-void delFirstLine(char* path) {
-  // 读取文件
-  File file = SPIFFS.open(path, FILE_READ);
-  if (!file) {
-    Serial.println("Failed to open file for reading");
-    return;
-  }
-
-  String content = "";                       // 定义变量
-  String line = file.readStringUntil('\n');  // 读取第一行
-
-  // 读取剩余行
-  while (file.available()) {
-    content += file.readStringUntil('\n');
-  }
-
-  file.close();  // 关闭文件
-
-  content = content.substring(content.indexOf('\n') + 1);  // 删除第一行
-
-  // 将剩余行写入文件
-  file = SPIFFS.open(path, FILE_WRITE);
-  if (file) {
-    file.print(content);                          // 写入文件
-    file.close();                                 // 关闭文件
-    Serial.println("File updated successfully");  // 打印日志
-  } else {
-    Serial.println("Failed to open file for writing");  // 打印日志
-  }
 }
 
 // 建议添加文件系统检查和错误恢复机制
